@@ -10,6 +10,18 @@ const bcrypt = require("bcryptjs");
 const jwt = require("jsonwebtoken");
 const express = require("express");
 const cors = require("cors");
+require("dotenv").config();
+const OpenAI = require("openai");
+
+
+// ===============================
+// AI Client
+// ===============================
+
+const client = new OpenAI({
+    apiKey: process.env.GROQ_API_KEY,
+    baseURL: "https://api.groq.com/openai/v1"
+});
 
 
 // ===============================
@@ -29,7 +41,6 @@ app.use(express.json());
 // JWT Configuration
 // ===============================
 
-// Secret used to create and verify JWT tokens
 const JWT_SECRET = "my-super-secret-key";
 
 
@@ -37,7 +48,6 @@ const JWT_SECRET = "my-super-secret-key";
 // Health Check Route
 // ===============================
 
-// Checks whether the server is running
 app.get("/", (req, res) => {
     res.json({
         message: "Auth server is running"
@@ -49,39 +59,28 @@ app.get("/", (req, res) => {
 // Authentication Middleware
 // ===============================
 
-// Checks whether the request contains a valid JWT
 function authenticateToken(req, res, next) {
 
-    // Get the Authorization header
-    // Example:
-    // Authorization: Bearer eyJhbGciOiJIUzI1Ni...
     const authHeader = req.headers["authorization"];
 
-    // Extract only the token
     const token = authHeader && authHeader.split(" ")[1];
 
-    // If no token was provided
     if (!token) {
         return res.status(401).json({
             message: "Access token required"
         });
     }
 
-    // Verify the token
     jwt.verify(token, JWT_SECRET, (err, user) => {
 
-        // Token is invalid or expired
         if (err) {
             return res.status(403).json({
                 message: "Invalid or expired token"
             });
         }
 
-        // Store the decoded user information
-        // so the next route can access it
         req.user = user;
 
-        // Authentication passed
         next();
     });
 }
@@ -91,17 +90,14 @@ function authenticateToken(req, res, next) {
 // Authorization Middleware
 // ===============================
 
-// Checks whether the logged-in user is an admin
 function requireAdmin(req, res, next) {
 
-    // req.user was added by authenticateToken
     if (req.user.role !== "admin") {
         return res.status(403).json({
             message: "Forbidden: Admin access required"
         });
     }
 
-    // User is an admin
     next();
 }
 
@@ -112,55 +108,50 @@ function requireAdmin(req, res, next) {
 
 app.post("/login", async (req, res) => {
 
-    // Get email and password from request body
     const { email, password } = req.body;
 
-    // Check that both fields were provided
     if (!email || !password) {
         return res.status(400).json({
             message: "Email and password are required"
         });
     }
 
-   // Find the user in the SQLite database
-const user = await new Promise((resolve, reject) => {
-    db.get(
-        `SELECT id, email, password, role
-         FROM users
-         WHERE email = ?`,
-        [email],
-        (err, row) => {
-            if (err) {
-                reject(err);
-            } else {
-                resolve(row);
+    // Find the user in the SQLite database
+    const user = await new Promise((resolve, reject) => {
+        db.get(
+            `SELECT id, email, password, role
+             FROM users
+             WHERE email = ?`,
+            [email],
+            (err, row) => {
+                if (err) {
+                    reject(err);
+                } else {
+                    resolve(row);
+                }
             }
-        }
-    );
-});
+        );
+    });
 
-    // User with this email doesn't exist
     if (!user) {
         return res.status(401).json({
             message: "Invalid email or password"
         });
     }
 
-    // Compare entered password with
-    // the stored bcrypt password hash
+    // Compare entered password with stored hash
     const passwordMatch = await bcrypt.compare(
         password,
         user.password
     );
 
-    // Password is incorrect
     if (!passwordMatch) {
         return res.status(401).json({
             message: "Invalid email or password"
         });
     }
 
-    // Create a JWT after successful login
+    // Create JWT
     const token = jwt.sign(
         {
             id: user.id,
@@ -173,7 +164,6 @@ const user = await new Promise((resolve, reject) => {
         }
     );
 
-    // Send the token back to the client
     res.json({
         message: "Login successful",
         token: token
@@ -185,7 +175,6 @@ const user = await new Promise((resolve, reject) => {
 // Protected Dashboard Route
 // ===============================
 
-// Only authenticated users can access this
 app.get("/dashboard", authenticateToken, (req, res) => {
 
     res.json({
@@ -199,9 +188,6 @@ app.get("/dashboard", authenticateToken, (req, res) => {
 // Admin Route
 // ===============================
 
-// User must:
-// 1. Have a valid JWT
-// 2. Have the admin role
 app.get(
     "/admin",
     authenticateToken,
@@ -214,6 +200,76 @@ app.get(
         });
     }
 );
+
+
+// ===============================
+// AI Support Decision Route
+// ===============================
+
+app.post("/support", authenticateToken, async (req, res) => {
+
+    const { message } = req.body;
+
+    if (!message) {
+        return res.status(400).json({
+            message: "Support message is required"
+        });
+    }
+
+    try {
+
+        const response = await client.chat.completions.create({
+            model: "openai/gpt-oss-20b",
+
+            messages: [
+                {
+                    role: "system",
+                    content:
+                        "Classify the customer message as exactly one of: refund, technical, general. Return only the category."
+                },
+                {
+                    role: "user",
+                    content: message
+                }
+            ],
+
+            temperature: 0
+        });
+
+        const decision = response.choices[0].message.content
+            .trim()
+            .toLowerCase();
+
+        if (decision === "refund") {
+
+            return res.json({
+                decision: "refund",
+                action: "Route to refund support"
+            });
+        }
+
+        if (decision === "technical") {
+
+            return res.json({
+                decision: "technical",
+                action: "Route to technical support"
+            });
+        }
+
+        return res.json({
+            decision: "general",
+            action: "Route to general support"
+        });
+
+    } catch (error) {
+
+        console.error(error);
+
+        return res.status(500).json({
+            message: "AI decision failed"
+        });
+    }
+});
 
 
 // ===============================
